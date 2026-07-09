@@ -47,7 +47,12 @@
 		2B44AB3F2FFCFA79007F8F37 /* Exceptions for "RegenWidget" folder in "RegenVorhersage" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				BrightSkyProvider.swift,
+				PrecipitationProvider.swift,
 				RadarFetcher.swift,
+				Secrets.swift,
+				SharedLocationStore.swift,
+				TomorrowIOProvider.swift,
 			);
 			target = 2BBEE67A2FFCE7310086EBB7 /* RegenVorhersage */;
 		};

@@ -74,31 +74,45 @@ struct RegenTimelineProvider: TimelineProvider {
     }
     
     /// Fetches location + radar data, returning a single timeline entry.
+    /// Checks for a manually set location in SharedLocationStore first,
+    /// then falls back to GPS if no manual location is configured.
     private func fetchRadarEntry() async -> RegenEntry {
         Self.logger.info("🔄 [TimelineProvider] fetchRadarEntry() starting...")
         let startTime = Date()
         
         do {
-            // Step 1: Get location
-            Self.logger.info("🔄 [TimelineProvider] Step 1: Fetching location...")
-            let locationManager = WidgetLocationManager()
-            let coordinate = try await locationManager.getCurrentLocation()
-            Self.logger.info("🔄 [TimelineProvider] Location obtained: \(coordinate.latitude), \(coordinate.longitude)")
-            
-            // Get locality
-            let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-            let geocoder = CLGeocoder()
+            // Step 1: Determine location (manual override or GPS)
+            let coordinate: CLLocationCoordinate2D
             var locality: String? = nil
-            do {
-                let placemarks = try await geocoder.reverseGeocodeLocation(location)
-                locality = placemarks.first?.locality ?? placemarks.first?.name
-            } catch {
-                Self.logger.error("🔄 [TimelineProvider] Reverse geocoding failed: \(error.localizedDescription)")
+            
+            if let manualCoord = SharedLocationStore.manualCoordinate {
+                // Use the manually set location from the app
+                coordinate = manualCoord
+                locality = SharedLocationStore.manualLocationName
+                Self.logger.info("🔄 [TimelineProvider] Step 1: Using manual location: \(coordinate.latitude), \(coordinate.longitude) (\(locality ?? "unknown"))")
+            } else {
+                // Fall back to GPS
+                Self.logger.info("🔄 [TimelineProvider] Step 1: Fetching GPS location...")
+                let locationManager = WidgetLocationManager()
+                coordinate = try await locationManager.getCurrentLocation()
+                Self.logger.info("🔄 [TimelineProvider] GPS location obtained: \(coordinate.latitude), \(coordinate.longitude)")
+                
+                // Reverse geocode for GPS-based locality
+                let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+                let geocoder = CLGeocoder()
+                do {
+                    let placemarks = try await geocoder.reverseGeocodeLocation(location)
+                    locality = placemarks.first?.locality ?? placemarks.first?.name
+                } catch {
+                    Self.logger.error("🔄 [TimelineProvider] Reverse geocoding failed: \(error.localizedDescription)")
+                }
             }
             
-            // Step 2: Fetch radar data
-            Self.logger.info("🔄 [TimelineProvider] Step 2: Fetching radar data...")
-            let points = try await RadarFetcher.fetchPrecipitation(
+            // Step 2: Select provider and fetch precipitation data
+            let provider = PrecipitationProviderFactory.provider(for: coordinate)
+            let providerName = PrecipitationProviderFactory.isInGermany(coordinate) ? "BrightSky" : "Tomorrow.io"
+            Self.logger.info("🔄 [TimelineProvider] Step 2: Fetching precipitation via \(providerName)...")
+            let points = try await provider.fetchPrecipitation(
                 lat: coordinate.latitude,
                 lon: coordinate.longitude
             )
@@ -222,17 +236,18 @@ struct RegenWidgetEntryView: View {
                         // Background Grid & Y-Axis Label
                         VStack(spacing: 0) {
                             if hasRainInNext90Mins {
-                                Divider().background(Color.secondary.opacity(0.3))
-                                HStack(spacing: 2) {
+                                HStack(spacing: 4) {
                                     Text("\(String(format: "%g", yAxisMax)) mm")
                                         .font(.system(size: 8))
                                         .foregroundStyle(.secondary)
                                     Image(systemName: "cloud.rain")
                                         .font(.system(size: 8))
                                         .foregroundStyle(.secondary)
-                                    Spacer()
+                                    Rectangle()
+                                        .fill(Color.secondary.opacity(0.3))
+                                        .frame(height: 0.5)
                                 }
-                                .padding(.top, 2)
+                                .padding(.top, 6)
                             }
                             
                             Spacer()
@@ -244,7 +259,7 @@ struct RegenWidgetEntryView: View {
                         // Bars
                         HStack(alignment: .bottom, spacing: 1) {
                             ForEach(Array(displayPoints.enumerated()), id: \.element.id) { index, point in
-                                barColumn(for: point, maxHeight: chartHeight)
+                                barColumn(for: point, maxHeight: chartHeight - 12)
                             }
                         }
                         .frame(maxWidth: .infinity)
