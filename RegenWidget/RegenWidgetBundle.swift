@@ -12,7 +12,5 @@ import SwiftUI
 struct RegenWidgetBundle: WidgetBundle {
     var body: some Widget {
         RegenWidget()
-        RegenWidgetControl()
-        RegenWidgetLiveActivity()
     }
 }

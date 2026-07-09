@@ -7,61 +7,315 @@
 
 import WidgetKit
 import SwiftUI
+import CoreLocation
+import os
 
-struct Provider: TimelineProvider {
-    func placeholder(in context: Context) -> SimpleEntry {
-        SimpleEntry(date: Date(), emoji: "😀")
-    }
+// MARK: - Timeline Entry
 
-    func getSnapshot(in context: Context, completion: @escaping (SimpleEntry) -> ()) {
-        let entry = SimpleEntry(date: Date(), emoji: "😀")
-        completion(entry)
-    }
-
-    func getTimeline(in context: Context, completion: @escaping (Timeline<Entry>) -> ()) {
-        var entries: [SimpleEntry] = []
-
-        // Generate a timeline consisting of five entries an hour apart, starting from the current date.
-        let currentDate = Date()
-        for hourOffset in 0 ..< 5 {
-            let entryDate = Calendar.current.date(byAdding: .hour, value: hourOffset, to: currentDate)!
-            let entry = SimpleEntry(date: entryDate, emoji: "😀")
-            entries.append(entry)
-        }
-
-        let timeline = Timeline(entries: entries, policy: .atEnd)
-        completion(timeline)
-    }
-
-//    func relevances() async -> WidgetRelevances<Void> {
-//        // Generate a list containing the contexts this widget is relevant in.
-//    }
-}
-
-struct SimpleEntry: TimelineEntry {
+struct RegenEntry: TimelineEntry {
     let date: Date
-    let emoji: String
+    let precipitationPoints: [PrecipitationPoint]
+    let errorMessage: String?
+    let debugInfo: String
+    let locality: String?
+    
+    /// Placeholder entry for widget gallery
+    static var placeholder: RegenEntry {
+        let now = Date()
+        let points = (0..<18).map { i in
+            PrecipitationPoint(
+                timestamp: now.addingTimeInterval(Double(i * 300)),
+                precipitationMM: [0, 0, 0.2, 0.5, 1.0, 2.5, 1.5, 0.8, 0.3, 0, 0, 0, 0, 0.1, 0.4, 0, 0, 0][i],
+                minutesFromNow: i * 5
+            )
+        }
+        return RegenEntry(date: now, precipitationPoints: points, errorMessage: nil, debugInfo: "Placeholder", locality: "")
+    }
 }
 
-struct RegenWidgetEntryView : View {
-    var entry: Provider.Entry
+// MARK: - Timeline Provider
 
-    var body: some View {
-        VStack {
-            Text("Time:")
-            Text(entry.date, style: .time)
-
-            Text("Emoji:")
-            Text(entry.emoji)
+struct RegenTimelineProvider: TimelineProvider {
+    
+    private static let logger = Logger(subsystem: "sascha.RegenVorhersage.RegenWidget", category: "TimelineProvider")
+    
+    func placeholder(in context: Context) -> RegenEntry {
+        Self.logger.info("🔄 [TimelineProvider] placeholder() called")
+        return RegenEntry.placeholder
+    }
+    
+    func getSnapshot(in context: Context, completion: @escaping (RegenEntry) -> Void) {
+        Self.logger.info("🔄 [TimelineProvider] getSnapshot() called, isPreview=\(context.isPreview)")
+        
+        if context.isPreview {
+            completion(RegenEntry.placeholder)
+            return
+        }
+        
+        Task {
+            let entry = await fetchRadarEntry()
+            completion(entry)
+        }
+    }
+    
+    func getTimeline(in context: Context, completion: @escaping (Timeline<RegenEntry>) -> Void) {
+        Self.logger.info("🔄 [TimelineProvider] getTimeline() called, family=\(context.family.description)")
+        
+        Task {
+            let entry = await fetchRadarEntry()
+            
+            // Reload in exactly 15 minutes
+            let reloadDate = Calendar.current.date(byAdding: .minute, value: 15, to: Date())!
+            Self.logger.info("🔄 [TimelineProvider] Next reload scheduled at: \(reloadDate)")
+            
+            let timeline = Timeline(entries: [entry], policy: .after(reloadDate))
+            completion(timeline)
+        }
+    }
+    
+    /// Fetches location + radar data, returning a single timeline entry.
+    private func fetchRadarEntry() async -> RegenEntry {
+        Self.logger.info("🔄 [TimelineProvider] fetchRadarEntry() starting...")
+        let startTime = Date()
+        
+        do {
+            // Step 1: Get location
+            Self.logger.info("🔄 [TimelineProvider] Step 1: Fetching location...")
+            let locationManager = WidgetLocationManager()
+            let coordinate = try await locationManager.getCurrentLocation()
+            Self.logger.info("🔄 [TimelineProvider] Location obtained: \(coordinate.latitude), \(coordinate.longitude)")
+            
+            // Get locality
+            let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            let geocoder = CLGeocoder()
+            var locality: String? = nil
+            do {
+                let placemarks = try await geocoder.reverseGeocodeLocation(location)
+                locality = placemarks.first?.locality ?? placemarks.first?.name
+            } catch {
+                Self.logger.error("🔄 [TimelineProvider] Reverse geocoding failed: \(error.localizedDescription)")
+            }
+            
+            // Step 2: Fetch radar data
+            Self.logger.info("🔄 [TimelineProvider] Step 2: Fetching radar data...")
+            let points = try await RadarFetcher.fetchPrecipitation(
+                lat: coordinate.latitude,
+                lon: coordinate.longitude
+            )
+            
+            let elapsed = Date().timeIntervalSince(startTime)
+            Self.logger.info("🔄 [TimelineProvider] ✅ Success: \(points.count) points in \(String(format: "%.2f", elapsed))s")
+            
+            let debugInfo = "OK: \(points.count)pts @ \(String(format: "%.2f", coordinate.latitude)),\(String(format: "%.2f", coordinate.longitude)) (\(String(format: "%.1f", elapsed))s)"
+            
+            return RegenEntry(
+                date: Date(),
+                precipitationPoints: points,
+                errorMessage: nil,
+                debugInfo: debugInfo,
+                locality: locality
+            )
+            
+        } catch {
+            let elapsed = Date().timeIntervalSince(startTime)
+            Self.logger.error("🔄 [TimelineProvider] ❌ Error after \(String(format: "%.2f", elapsed))s: \(error.localizedDescription)")
+            
+            return RegenEntry(
+                date: Date(),
+                precipitationPoints: [],
+                errorMessage: error.localizedDescription,
+                debugInfo: "ERR: \(error.localizedDescription)",
+                locality: nil
+            )
         }
     }
 }
+
+// MARK: - Widget Entry View
+
+struct RegenWidgetEntryView: View {
+    var entry: RegenEntry
+    
+    @Environment(\.widgetFamily) var family
+    
+    /// We display the first 18 intervals (18 × 5 = 90 minutes) from the fetched data.
+    private var displayPoints: [PrecipitationPoint] {
+        Array(entry.precipitationPoints.prefix(18))
+    }
+    
+    /// Maximum precipitation across displayed points, used for sensible scaling.
+    private var yAxisMax: Double {
+        let maxVal = displayPoints.map(\.precipitationMM).max() ?? 0
+        if maxVal <= 0.5 { return 0.5 }
+        if maxVal <= 1.0 { return 1.0 }
+        if maxVal <= 2.0 { return 2.0 }
+        if maxVal <= 5.0 { return 5.0 }
+        if maxVal <= 10.0 { return 10.0 }
+        if maxVal <= 20.0 { return 20.0 }
+        return ceil(maxVal / 10.0) * 10.0
+    }
+    
+    /// Whether there is any rain forecast in the next 90 minutes.
+    private var hasRainInNext90Mins: Bool {
+        displayPoints.contains(where: { $0.precipitationMM > 0 })
+    }
+    
+    private func timeString(for index: Int) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        if index < displayPoints.count {
+            return formatter.string(from: displayPoints[index].timestamp)
+        }
+        // Fallback for projected time
+        let fallbackDate = entry.date.addingTimeInterval(TimeInterval(index * 5 * 60))
+        return formatter.string(from: fallbackDate)
+    }
+    
+    private var refreshTimeString: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: entry.date)
+    }
+    
+    var body: some View {
+        if let errorMessage = entry.errorMessage {
+            errorView(errorMessage)
+        } else if displayPoints.isEmpty {
+            errorView("Keine Daten")
+        } else {
+            radarChartView
+        }
+    }
+    
+    // MARK: - Chart View
+    
+    private var radarChartView: some View {
+        VStack(spacing: 2) {
+            // Minimal title row
+            HStack {
+                HStack(spacing: 3) {
+                    Image(systemName: "location.fill")
+                        .font(.caption2)
+                    Text(entry.locality ?? "")
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .lineLimit(1)
+                }
+                .foregroundStyle(.secondary)
+                
+                Spacer()
+                
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption2)
+                    Text(refreshTimeString)
+                        .font(.caption2)
+                }
+                .foregroundStyle(.secondary)
+            }
+            
+            // Bar chart area
+            GeometryReader { geometry in
+                let chartHeight = max(0, geometry.size.height - 24)
+                VStack(spacing: 0) {
+                    ZStack(alignment: .bottom) {
+                        // Background Grid & Y-Axis Label
+                        VStack(spacing: 0) {
+                            if hasRainInNext90Mins {
+                                Divider().background(Color.secondary.opacity(0.3))
+                                HStack(spacing: 2) {
+                                    Text("\(String(format: "%g", yAxisMax)) mm")
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(.secondary)
+                                    Image(systemName: "cloud.rain")
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                }
+                                .padding(.top, 2)
+                            }
+                            
+                            Spacer()
+                            
+                            Divider().background(Color.secondary.opacity(0.3))
+                        }
+                        .frame(height: chartHeight)
+                        
+                        // Bars
+                        HStack(alignment: .bottom, spacing: 1) {
+                            ForEach(Array(displayPoints.enumerated()), id: \.element.id) { index, point in
+                                barColumn(for: point, maxHeight: chartHeight)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    
+                    // X-axis tick labels every 30 minutes (indices 0, 6, 12)
+                    HStack(spacing: 0) {
+                        Text(timeString(for: 0))
+                            .font(.system(size: 8))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        
+                        Text(timeString(for: 6))
+                            .font(.system(size: 8))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                        
+                        Text(timeString(for: 12))
+                            .font(.system(size: 8))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                        
+                        Text(timeString(for: 18))
+                            .font(.system(size: 8))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                    .padding(.top, 4)
+                }
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
+    }
+    
+    // MARK: - Bar Column
+    
+    private func barColumn(for point: PrecipitationPoint, maxHeight: CGFloat) -> some View {
+        let hasRain = point.precipitationMM > 0
+        let height: CGFloat = hasRain
+            ? max(4, CGFloat(point.precipitationMM / yAxisMax) * maxHeight)
+            : maxHeight * 0.1 // minimal height for zero-rain columns
+        
+        return RoundedRectangle(cornerRadius: 2)
+            .fill(hasRain ? Color.blue : Color.gray.opacity(0.3))
+            .frame(height: height)
+    }
+    
+    // MARK: - Error View
+    
+    private func errorView(_ message: String) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: "exclamationmark.icloud")
+                .font(.title2)
+                .foregroundStyle(.secondary)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding()
+    }
+}
+
+// MARK: - Widget Configuration
 
 struct RegenWidget: Widget {
     let kind: String = "RegenWidget"
-
+    
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: Provider()) { entry in
+        StaticConfiguration(kind: kind, provider: RegenTimelineProvider()) { entry in
             if #available(iOS 17.0, *) {
                 RegenWidgetEntryView(entry: entry)
                     .containerBackground(.fill.tertiary, for: .widget)
@@ -71,14 +325,22 @@ struct RegenWidget: Widget {
                     .background()
             }
         }
-        .configurationDisplayName("My Widget")
-        .description("This is an example widget.")
+        .configurationDisplayName("Regenradar")
+        .description("Niederschlagsvorhersage für die nächsten 90 Minuten")
+        .supportedFamilies([.systemSmall, .systemMedium])
     }
 }
+
+// MARK: - Preview
 
 #Preview(as: .systemSmall) {
     RegenWidget()
 } timeline: {
-    SimpleEntry(date: .now, emoji: "😀")
-    SimpleEntry(date: .now, emoji: "🤩")
+    RegenEntry.placeholder
+}
+
+#Preview(as: .systemMedium) {
+    RegenWidget()
+} timeline: {
+    RegenEntry.placeholder
 }
