@@ -53,6 +53,7 @@ fastlane/test_output
 .DS_Store
 
 # Project specific / Sensitive files
+build_ipa.sh
 Secrets.swift
 exportOptions.plist
 *.mobileprovision
