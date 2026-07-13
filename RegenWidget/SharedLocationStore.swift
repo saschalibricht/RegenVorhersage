@@ -27,8 +27,21 @@ enum WidgetMode: String, CaseIterable, Sendable {
 enum SharedLocationStore {
     
     /// The App Group identifier shared between the main app and the widget extension.
-    /// Must match the value in both targets' entitlements files.
-    static let appGroupID = "group.sascha.RegenVorhersage"
+    /// Resolved dynamically at runtime to match the resigned entitlements in sideloaded IPAs.
+    static var appGroupID: String {
+        guard let bundleID = Bundle.main.bundleIdentifier else {
+            return "group.sascha.RegenVorhersage"
+        }
+        
+        var mainBundleID = bundleID
+        if mainBundleID.hasSuffix(".RegenWidget") {
+            mainBundleID = String(mainBundleID.dropLast(".RegenWidget".count))
+        } else if mainBundleID.hasSuffix(".RegenWidgetExtension") {
+            mainBundleID = String(mainBundleID.dropLast(".RegenWidgetExtension".count))
+        }
+        
+        return "group.\(mainBundleID)"
+    }
     
     private static let logger = Logger(subsystem: "sascha.RegenVorhersage", category: "SharedLocationStore")
     
@@ -44,21 +57,27 @@ enum SharedLocationStore {
     static let lastWidgetIntentModeKey  = "settings_lastWidgetIntentMode"
     
     /// The shared UserDefaults suite for the app group.
-    private static var sharedDefaults: UserDefaults? {
-        UserDefaults(suiteName: appGroupID)
+    /// Falls back to standard UserDefaults if the app group container is not available.
+    private static var sharedDefaults: UserDefaults {
+        let identifier = appGroupID
+        if let shared = UserDefaults(suiteName: identifier) {
+            return shared
+        }
+        logger.error("⚠️ [SharedLocationStore] Could not access shared UserDefaults for group: \(identifier). Falling back to UserDefaults.standard.")
+        return UserDefaults.standard
     }
     
     // MARK: - Read
     
     /// Whether a manual location is currently set.
     static var isManualLocation: Bool {
-        sharedDefaults?.bool(forKey: isManualKey) ?? false
+        sharedDefaults.bool(forKey: isManualKey)
     }
     
     /// The manually set coordinate, or `nil` if using automatic (GPS) location.
     static var manualCoordinate: CLLocationCoordinate2D? {
+        let defaults = sharedDefaults
         guard isManualLocation,
-              let defaults = sharedDefaults,
               defaults.object(forKey: latitudeKey) != nil,
               defaults.object(forKey: longitudeKey) != nil else {
             return nil
@@ -71,35 +90,32 @@ enum SharedLocationStore {
     /// The display name for the manually set location, or `nil`.
     static var manualLocationName: String? {
         guard isManualLocation else { return nil }
-        return sharedDefaults?.string(forKey: nameKey)
+        return sharedDefaults.string(forKey: nameKey)
     }
     
     /// The user-configured update interval in minutes (default 15)
     static var updateIntervalMinutes: Int {
-        let val = sharedDefaults?.integer(forKey: updateIntervalKey) ?? 0
+        let val = sharedDefaults.integer(forKey: updateIntervalKey)
         return val > 0 ? val : 15
     }
 
     /// The active widget display mode (rain or UV). Defaults to rain.
     static var widgetMode: String {
-        get { sharedDefaults?.string(forKey: widgetModeKey) ?? WidgetMode.rain.rawValue }
-        set { sharedDefaults?.set(newValue, forKey: widgetModeKey) }
+        get { sharedDefaults.string(forKey: widgetModeKey) ?? WidgetMode.rain.rawValue }
+        set { sharedDefaults.set(newValue, forKey: widgetModeKey) }
     }
 
     /// The last intent mode the widget observed — used to detect long-press configuration changes.
     static var lastWidgetIntentMode: String {
-        get { sharedDefaults?.string(forKey: lastWidgetIntentModeKey) ?? WidgetMode.rain.rawValue }
-        set { sharedDefaults?.set(newValue, forKey: lastWidgetIntentModeKey) }
+        get { sharedDefaults.string(forKey: lastWidgetIntentModeKey) ?? WidgetMode.rain.rawValue }
+        set { sharedDefaults.set(newValue, forKey: lastWidgetIntentModeKey) }
     }
     
     // MARK: - Write
     
     /// Saves a manual location to the shared store.
     static func setManualLocation(coordinate: CLLocationCoordinate2D, name: String) {
-        guard let defaults = sharedDefaults else {
-            logger.error("❌ [SharedLocationStore] Could not access shared UserDefaults for group: \(appGroupID)")
-            return
-        }
+        let defaults = sharedDefaults
         defaults.set(true, forKey: isManualKey)
         defaults.set(coordinate.latitude, forKey: latitudeKey)
         defaults.set(coordinate.longitude, forKey: longitudeKey)
@@ -109,10 +125,7 @@ enum SharedLocationStore {
     
     /// Clears the manual location, reverting to automatic (GPS) mode.
     static func clearManualLocation() {
-        guard let defaults = sharedDefaults else {
-            logger.error("❌ [SharedLocationStore] Could not access shared UserDefaults for group: \(appGroupID)")
-            return
-        }
+        let defaults = sharedDefaults
         defaults.set(false, forKey: isManualKey)
         defaults.removeObject(forKey: latitudeKey)
         defaults.removeObject(forKey: longitudeKey)

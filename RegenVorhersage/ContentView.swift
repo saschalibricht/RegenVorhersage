@@ -486,9 +486,33 @@ struct ContentView: View {
                 setManualLocation(coordinate: coordinate, name: name)
             }
         }
+        .onAppear {
+            loadSavedLocation()
+            if isManualLocation {
+                fetchData()
+            }
+        }
     }
     
     // MARK: - Actions
+    
+    /// Loads the manually set location from the shared store if one exists.
+    private func loadSavedLocation() {
+        if SharedLocationStore.isManualLocation,
+           let coord = SharedLocationStore.manualCoordinate {
+            isManualLocation = true
+            manualLatitude = coord.latitude
+            manualLongitude = coord.longitude
+            manualLocationName = SharedLocationStore.manualLocationName
+            Self.logger.info("📍 [ContentView] Loaded saved manual location: \(self.manualLocationName ?? "") (\(coord.latitude), \(coord.longitude))")
+        } else {
+            isManualLocation = false
+            manualLatitude = nil
+            manualLongitude = nil
+            manualLocationName = nil
+            Self.logger.info("📍 [ContentView] No saved manual location found, using GPS")
+        }
+    }
     
     /// Sets a manually selected location, persists it to the shared store,
     /// triggers a data fetch, and reloads the widget timeline.
