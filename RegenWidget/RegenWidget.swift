@@ -7,6 +7,7 @@
 
 import WidgetKit
 import SwiftUI
+import AppIntents
 import CoreLocation
 import os
 
@@ -15,129 +16,161 @@ import os
 struct RegenEntry: TimelineEntry {
     let date: Date
     let precipitationPoints: [PrecipitationPoint]
+    let uvPoints: [UVPoint]
+    let widgetMode: WidgetMode
     let errorMessage: String?
     let debugInfo: String
     let locality: String?
-    
+
     /// Placeholder entry for widget gallery
     static var placeholder: RegenEntry {
         let now = Date()
-        let points = (0..<18).map { i in
+        let precip = (0..<18).map { i in
             PrecipitationPoint(
                 timestamp: now.addingTimeInterval(Double(i * 300)),
                 precipitationMM: [0, 0, 0.2, 0.5, 1.0, 2.5, 1.5, 0.8, 0.3, 0, 0, 0, 0, 0.1, 0.4, 0, 0, 0][i],
                 minutesFromNow: i * 5
             )
         }
-        return RegenEntry(date: now, precipitationPoints: points, errorMessage: nil, debugInfo: "Placeholder", locality: "")
+        let uv = (0..<18).map { i in
+            UVPoint(
+                timestamp: now.addingTimeInterval(Double(i * 300)),
+                uvIndex: [3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 7.0, 6.5, 6.0, 5.5, 5.0, 4.5, 4.0, 3.5][i],
+                minutesFromNow: i * 5
+            )
+        }
+        return RegenEntry(
+            date: now,
+            precipitationPoints: precip,
+            uvPoints: uv,
+            widgetMode: .rain,
+            errorMessage: nil,
+            debugInfo: "Placeholder",
+            locality: ""
+        )
     }
 }
 
-// MARK: - Timeline Provider
+// MARK: - Timeline Provider (AppIntentTimelineProvider)
 
-struct RegenTimelineProvider: TimelineProvider {
-    
-    private static let logger = Logger(subsystem: "sascha.RegenVorhersage.RegenWidget", category: "TimelineProvider")
-    
+struct RegenTimelineProvider: AppIntentTimelineProvider {
+    typealias Entry  = RegenEntry
+    typealias Intent = ConfigurationAppIntent
+
+    private static let logger = Logger(
+        subsystem: "sascha.RegenVorhersage.RegenWidget",
+        category: "TimelineProvider"
+    )
+
     func placeholder(in context: Context) -> RegenEntry {
         Self.logger.info("🔄 [TimelineProvider] placeholder() called")
         return RegenEntry.placeholder
     }
-    
-    func getSnapshot(in context: Context, completion: @escaping (RegenEntry) -> Void) {
-        Self.logger.info("🔄 [TimelineProvider] getSnapshot() called, isPreview=\(context.isPreview)")
-        
-        if context.isPreview {
-            completion(RegenEntry.placeholder)
-            return
-        }
-        
-        Task {
-            let entry = await fetchRadarEntry()
-            completion(entry)
+
+    func snapshot(for configuration: ConfigurationAppIntent, in context: Context) async -> RegenEntry {
+        Self.logger.info("🔄 [TimelineProvider] snapshot() isPreview=\(context.isPreview)")
+        guard !context.isPreview else { return RegenEntry.placeholder }
+        return await fetchEntry(configuration: configuration)
+    }
+
+    func timeline(for configuration: ConfigurationAppIntent, in context: Context) async -> Timeline<RegenEntry> {
+        Self.logger.info("🔄 [TimelineProvider] timeline() called")
+        let entry = await fetchEntry(configuration: configuration)
+        let interval = SharedLocationStore.updateIntervalMinutes
+        let reloadDate = Calendar.current.date(byAdding: .minute, value: interval, to: Date())!
+        Self.logger.info("🔄 [TimelineProvider] Next reload in \(interval) min at \(reloadDate)")
+        return Timeline(entries: [entry], policy: .after(reloadDate))
+    }
+
+    // MARK: - Mode Resolution
+
+    /// Determines the effective widget mode.
+    ///
+    /// Uses `lastWidgetIntentMode` to detect genuine long-press configuration changes:
+    /// - If the intent mode differs from the last-seen intent mode → user long-pressed → intent wins.
+    /// - Otherwise → use `SharedLocationStore.widgetMode` (may have been updated by the app).
+    ///
+    /// This lets both the long-press widget config AND the in-app picker drive the mode correctly.
+    private func resolveMode(configuration: ConfigurationAppIntent) -> WidgetMode {
+        let intentMode    = configuration.mode
+        let lastIntentStr = SharedLocationStore.lastWidgetIntentMode
+        let lastIntent    = WidgetMode(rawValue: lastIntentStr) ?? .rain
+
+        // Always record the current intent so future calls can detect genuine changes.
+        SharedLocationStore.lastWidgetIntentMode = intentMode.rawValue
+
+        if intentMode != lastIntent {
+            // Intent changed since last call → genuine long-press selection.
+            // Override the store so the app reflects the new choice.
+            SharedLocationStore.widgetMode = intentMode.rawValue
+            return intentMode
+        } else {
+            // Intent unchanged → honour store (app may have set a different mode).
+            return WidgetMode(rawValue: SharedLocationStore.widgetMode) ?? intentMode
         }
     }
-    
-    func getTimeline(in context: Context, completion: @escaping (Timeline<RegenEntry>) -> Void) {
-        Self.logger.info("🔄 [TimelineProvider] getTimeline() called, family=\(context.family.description)")
-        
-        Task {
-            let entry = await fetchRadarEntry()
-            
-            // Reload based on user configuration
-            let interval = SharedLocationStore.updateIntervalMinutes
-            let reloadDate = Calendar.current.date(byAdding: .minute, value: interval, to: Date())!
-            Self.logger.info("🔄 [TimelineProvider] Next reload scheduled at: \(reloadDate) (in \(interval) min)")
-            
-            let timeline = Timeline(entries: [entry], policy: .after(reloadDate))
-            completion(timeline)
-        }
-    }
-    
-    /// Fetches location + radar data, returning a single timeline entry.
-    /// Checks for a manually set location in SharedLocationStore first,
-    /// then falls back to GPS if no manual location is configured.
-    private func fetchRadarEntry() async -> RegenEntry {
-        Self.logger.info("🔄 [TimelineProvider] fetchRadarEntry() starting...")
-        let startTime = Date()
-        
+
+    // MARK: - Data Fetch
+
+    private func fetchEntry(configuration: ConfigurationAppIntent) async -> RegenEntry {
+        Self.logger.info("🔄 [TimelineProvider] fetchEntry() starting")
+        let start = Date()
+        let mode  = resolveMode(configuration: configuration)
+
         do {
-            // Step 1: Determine location (manual override or GPS)
+            // Step 1: Resolve location
             let coordinate: CLLocationCoordinate2D
             var locality: String? = nil
-            
-            if let manualCoord = SharedLocationStore.manualCoordinate {
-                // Use the manually set location from the app
-                coordinate = manualCoord
-                locality = SharedLocationStore.manualLocationName
-                Self.logger.info("🔄 [TimelineProvider] Step 1: Using manual location: \(coordinate.latitude), \(coordinate.longitude) (\(locality ?? "unknown"))")
+
+            if let manual = SharedLocationStore.manualCoordinate {
+                coordinate = manual
+                locality   = SharedLocationStore.manualLocationName
+                Self.logger.info("🔄 [TimelineProvider] Using manual location: \(coordinate.latitude), \(coordinate.longitude)")
             } else {
-                // Fall back to GPS
-                Self.logger.info("🔄 [TimelineProvider] Step 1: Fetching GPS location...")
-                let locationManager = WidgetLocationManager()
-                coordinate = try await locationManager.getCurrentLocation()
-                Self.logger.info("🔄 [TimelineProvider] GPS location obtained: \(coordinate.latitude), \(coordinate.longitude)")
-                
-                // Reverse geocode for GPS-based locality
-                let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-                let geocoder = CLGeocoder()
-                do {
-                    let placemarks = try await geocoder.reverseGeocodeLocation(location)
+                Self.logger.info("🔄 [TimelineProvider] Fetching GPS location")
+                let lm = WidgetLocationManager()
+                coordinate = try await lm.getCurrentLocation()
+
+                let loc = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+                if let placemarks = try? await CLGeocoder().reverseGeocodeLocation(loc) {
                     locality = placemarks.first?.locality ?? placemarks.first?.name
-                } catch {
-                    Self.logger.error("🔄 [TimelineProvider] Reverse geocoding failed: \(error.localizedDescription)")
                 }
             }
-            
-            // Step 2: Select provider and fetch precipitation data
-            let provider = PrecipitationProviderFactory.provider(for: coordinate)
-            let providerName = PrecipitationProviderFactory.isInGermany(coordinate) ? "BrightSky" : "Tomorrow.io"
-            Self.logger.info("🔄 [TimelineProvider] Step 2: Fetching precipitation via \(providerName)...")
-            let points = try await provider.fetchPrecipitation(
-                lat: coordinate.latitude,
-                lon: coordinate.longitude
-            )
-            
-            let elapsed = Date().timeIntervalSince(startTime)
-            Self.logger.info("🔄 [TimelineProvider] ✅ Success: \(points.count) points in \(String(format: "%.2f", elapsed))s")
-            
-            let debugInfo = "OK: \(points.count)pts @ \(String(format: "%.2f", coordinate.latitude)),\(String(format: "%.2f", coordinate.longitude)) (\(String(format: "%.1f", elapsed))s)"
-            
+
+            // Step 2: Fetch only the required data for the active mode
+            var points: [PrecipitationPoint] = []
+            var uvPoints: [UVPoint] = []
+
+            if mode == .rain {
+                points = try await PrecipitationProviderFactory
+                    .provider(for: coordinate)
+                    .fetchPrecipitation(lat: coordinate.latitude, lon: coordinate.longitude)
+            } else {
+                uvPoints = try await UVFetcher()
+                    .fetchUVIndex(lat: coordinate.latitude, lon: coordinate.longitude)
+            }
+
+            let elapsed = Date().timeIntervalSince(start)
+            Self.logger.info("🔄 [TimelineProvider] ✅ Mode: \(mode.rawValue). \(points.count) rain / \(uvPoints.count) UV in \(String(format: "%.2f", elapsed))s")
+
             return RegenEntry(
                 date: Date(),
                 precipitationPoints: points,
+                uvPoints: uvPoints,
+                widgetMode: mode,
                 errorMessage: nil,
-                debugInfo: debugInfo,
+                debugInfo: "OK \(points.count)R \(uvPoints.count)UV (Mode: \(mode.rawValue))",
                 locality: locality
             )
-            
+
         } catch {
-            let elapsed = Date().timeIntervalSince(startTime)
-            Self.logger.error("🔄 [TimelineProvider] ❌ Error after \(String(format: "%.2f", elapsed))s: \(error.localizedDescription)")
-            
+            let elapsed = Date().timeIntervalSince(start)
+            Self.logger.error("🔄 [TimelineProvider] ❌ \(error.localizedDescription) after \(String(format: "%.2f", elapsed))s")
             return RegenEntry(
                 date: Date(),
                 precipitationPoints: [],
+                uvPoints: [],
+                widgetMode: mode,
                 errorMessage: error.localizedDescription,
                 debugInfo: "ERR: \(error.localizedDescription)",
                 locality: nil
@@ -150,87 +183,92 @@ struct RegenTimelineProvider: TimelineProvider {
 
 struct RegenWidgetEntryView: View {
     var entry: RegenEntry
-    
+
     @Environment(\.widgetFamily) var family
-    
-    /// We display the first 18 intervals (18 × 5 = 90 minutes) from the fetched data.
+
+    // MARK: Rain helpers
+
     private var displayPoints: [PrecipitationPoint] {
         Array(entry.precipitationPoints.prefix(18))
     }
-    
-    /// Maximum precipitation across displayed points, used for sensible scaling.
+
     private var yAxisMax: Double {
         let maxVal = displayPoints.map(\.precipitationMM).max() ?? 0
         if maxVal <= 10.0 { return 10.0 }
         if maxVal <= 20.0 { return 20.0 }
         return ceil(maxVal / 10.0) * 10.0
     }
-    
-    /// Whether there is any rain forecast in the next 90 minutes.
+
     private var hasRainInNext90Mins: Bool {
         displayPoints.contains(where: { $0.precipitationMM > 0 })
     }
-    
-    private func timeString(for index: Int) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        if index < displayPoints.count {
-            return formatter.string(from: displayPoints[index].timestamp)
-        }
-        // Fallback for projected time
-        let fallbackDate = entry.date.addingTimeInterval(TimeInterval(index * 5 * 60))
-        return formatter.string(from: fallbackDate)
+
+    // MARK: UV helpers
+
+    private var uvDisplayPoints: [UVPoint] {
+        Array(entry.uvPoints.prefix(18))
     }
-    
+
+    /// Y-axis ceiling for UV: default 8, scales up if any value exceeds it.
+    private var uvYAxisMax: Double {
+        let maxVal = uvDisplayPoints.map(\.uvIndex).max() ?? 0
+        return maxVal > 8.0 ? ceil(maxVal) : 8.0
+    }
+
+    private func uvBarColor(for uvIndex: Double) -> Color {
+        switch uvIndex {
+        case ..<0.1: return Color.gray.opacity(0.3)
+        case ..<3:   return Color(red: 0.35, green: 0.75, blue: 0.25)  // Low – green
+        case ..<6:   return Color(red: 0.97, green: 0.80, blue: 0.05)  // Moderate – yellow
+        case ..<8:   return Color(red: 0.97, green: 0.49, blue: 0.09)  // High – orange
+        default:     return Color(red: 0.85, green: 0.14, blue: 0.14)  // Very High – red
+        }
+    }
+
+    // MARK: Shared helpers
+
+    private func timeString(for index: Int, in points: [any _TimestampedPoint]) -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm"
+        if index < points.count {
+            return fmt.string(from: points[index].pointTimestamp)
+        }
+        return fmt.string(from: entry.date.addingTimeInterval(TimeInterval(index * 5 * 60)))
+    }
+
     private var refreshTimeString: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return formatter.string(from: entry.date)
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm"
+        return fmt.string(from: entry.date)
     }
-    
+
+    // MARK: - Body
+
     var body: some View {
-        if let errorMessage = entry.errorMessage {
-            errorView(errorMessage)
-        } else if displayPoints.isEmpty {
-            errorView("Keine Daten")
+        if let error = entry.errorMessage {
+            errorView(error)
         } else {
-            radarChartView
+            switch entry.widgetMode {
+            case .rain:
+                if displayPoints.isEmpty { errorView("Keine Daten") }
+                else { radarChartView }
+            case .uv:
+                if uvDisplayPoints.isEmpty { errorView("Keine UV-Daten") }
+                else { uvChartView }
+            }
         }
     }
-    
-    // MARK: - Chart View
-    
+
+    // MARK: - Rain Chart
+
     private var radarChartView: some View {
         VStack(spacing: 2) {
-            // Minimal title row
-            HStack {
-                HStack(spacing: 3) {
-                    Image(systemName: "location.fill")
-                        .font(.caption2)
-                    Text(entry.locality ?? "")
-                        .font(.caption2)
-                        .fontWeight(.semibold)
-                        .lineLimit(1)
-                }
-                .foregroundStyle(.secondary)
-                
-                Spacer()
-                
-                HStack(spacing: 3) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.caption2)
-                    Text(refreshTimeString)
-                        .font(.caption2)
-                }
-                .foregroundStyle(.secondary)
-            }
-            
-            // Bar chart area
-            GeometryReader { geometry in
-                let chartHeight = max(0, geometry.size.height - 24)
+            headerRow
+            GeometryReader { geo in
+                let chartH = max(0, geo.size.height - 24)
                 VStack(spacing: 0) {
                     ZStack(alignment: .bottom) {
-                        // Background Grid & Y-Axis Label
+                        // Background grid + Y-axis label
                         VStack(spacing: 0) {
                             if hasRainInNext90Mins {
                                 HStack(spacing: 4) {
@@ -246,124 +284,212 @@ struct RegenWidgetEntryView: View {
                                 }
                                 .padding(.top, 6)
                             }
-                            
                             Spacer()
-                            
                             Divider().background(Color.secondary.opacity(0.3))
                         }
-                        .frame(height: chartHeight)
-                        
+                        .frame(height: chartH)
+
                         // Bars
                         HStack(alignment: .bottom, spacing: 1) {
-                            ForEach(Array(displayPoints.enumerated()), id: \.element.id) { index, point in
-                                barColumn(for: point, maxHeight: chartHeight - 24)
+                            ForEach(Array(displayPoints.enumerated()), id: \.element.id) { _, point in
+                                rainBarColumn(for: point, maxHeight: chartH - 24)
                             }
                         }
                         .frame(maxWidth: .infinity)
                     }
-                    
-                    // X-axis tick labels every 30 minutes (indices 0, 6, 12, 18)
-                    GeometryReader { labelGeo in
-                        let w = labelGeo.size.width
-                        let wb = (w - 17.0) / 18.0
-                        
-                        ZStack(alignment: .topLeading) {
-                            // Tick marks
-                            Rectangle()
-                                .fill(Color.secondary)
-                                .frame(width: 1.5, height: 5)
-                                .offset(x: 0.5 * wb - 0.75, y: 0)
-                            
-                            Rectangle()
-                                .fill(Color.secondary)
-                                .frame(width: 1.5, height: 5)
-                                .offset(x: 6.0 * (wb + 1.0) + 0.5 * wb - 0.75, y: 0)
-                            
-                            Rectangle()
-                                .fill(Color.secondary)
-                                .frame(width: 1.5, height: 5)
-                                .offset(x: 12.0 * (wb + 1.0) + 0.5 * wb - 0.75, y: 0)
-                            
-                            Rectangle()
-                                .fill(Color.secondary)
-                                .frame(width: 1.5, height: 5)
-                                .offset(x: 17.0 * (wb + 1.0) + 0.5 * wb - 0.75, y: 0)
-                            
-                            // 0 min
-                            Text(timeString(for: 0))
-                                .font(.system(size: 8))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 40, alignment: .center)
-                                .offset(x: 0.5 * wb - 20.0, y: 7)
-                            
-                            // 30 min
-                            Text(timeString(for: 6))
-                                .font(.system(size: 8))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 40, alignment: .center)
-                                .offset(x: 6.0 * (wb + 1.0) + 0.5 * wb - 20.0, y: 7)
-                            
-                            // 60 min
-                            Text(timeString(for: 12))
-                                .font(.system(size: 8))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 40, alignment: .center)
-                                .offset(x: 12.0 * (wb + 1.0) + 0.5 * wb - 20.0, y: 7)
-                            
-                            // 90 min
-                            Text(timeString(for: 18))
-                                .font(.system(size: 8))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 40, alignment: .center)
-                                .offset(x: 17.0 * (wb + 1.0) + 0.5 * wb - 20.0, y: 7)
-                        }
-                    }
-                    .frame(height: 24)
+
+                    xAxisLabels(using: displayPoints.map { $0 as any _TimestampedPoint })
                 }
             }
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 4)
     }
-    
-    // MARK: - Bar Column
-    
-    private func barColumn(for point: PrecipitationPoint, maxHeight: CGFloat) -> some View {
-        let hasRain = point.precipitationMM > 0
+
+    private func rainBarColumn(for point: PrecipitationPoint, maxHeight: CGFloat) -> some View {
+        let hasRain  = point.precipitationMM > 0
         let baseline = maxHeight * 0.1
-        
         let height: CGFloat = hasRain
             ? baseline + CGFloat(point.precipitationMM / yAxisMax) * (maxHeight - baseline)
             : baseline
-        
+
         return RoundedRectangle(cornerRadius: 2)
             .fill(hasRain ? Color.blue : Color.gray.opacity(0.3))
             .frame(height: height)
     }
-    
+
+    // MARK: - UV Chart
+
+    private var uvChartView: some View {
+        VStack(spacing: 2) {
+            headerRow
+            GeometryReader { geo in
+                let chartH = max(0, geo.size.height - 24)
+                VStack(spacing: 0) {
+                    ZStack(alignment: .bottom) {
+                        // Background grid + Y-axis label
+                        VStack(spacing: 0) {
+                            HStack(spacing: 4) {
+                                Text("UV \(Int(uvYAxisMax))")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: "sun.max.fill")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.orange)
+                                Rectangle()
+                                    .fill(Color.secondary.opacity(0.3))
+                                    .frame(height: 0.5)
+                            }
+                            .padding(.top, 6)
+                            Spacer()
+                            Divider().background(Color.secondary.opacity(0.3))
+                        }
+                        .frame(height: chartH)
+
+                        // Bars
+                        HStack(alignment: .bottom, spacing: 1) {
+                            ForEach(Array(uvDisplayPoints.enumerated()), id: \.element.id) { _, point in
+                                uvBarColumn(for: point, maxHeight: chartH - 24)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+
+                    xAxisLabels(using: uvDisplayPoints.map { $0 as any _TimestampedPoint })
+                }
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
+    }
+
+    private func uvBarColumn(for point: UVPoint, maxHeight: CGFloat) -> some View {
+        let clamped  = min(point.uvIndex, uvYAxisMax)
+        let baseline = maxHeight * 0.1
+        let textHeight: CGFloat = 8
+        let usableHeight = max(0, maxHeight - textHeight)
+        
+        let height: CGFloat = clamped < 0.1
+            ? baseline
+            : baseline + CGFloat(clamped / uvYAxisMax) * (usableHeight - baseline)
+
+        return VStack(spacing: 1) {
+            if point.uvIndex >= 0.5 {
+                Text(String(format: "%.0f", point.uvIndex))
+                    .font(.system(size: 6.5, weight: .bold))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(" ")
+                    .font(.system(size: 6.5))
+            }
+            RoundedRectangle(cornerRadius: 2)
+                .fill(uvBarColor(for: point.uvIndex))
+                .frame(height: height)
+        }
+    }
+
+    // MARK: - Shared Sub-views
+
+    /// Top row with location name and last-refresh time.
+    private var headerRow: some View {
+        HStack {
+            HStack(spacing: 3) {
+                Image(systemName: "location.fill").font(.caption2)
+                Text(entry.locality ?? "")
+                    .font(.caption2).fontWeight(.semibold).lineLimit(1)
+            }
+            .foregroundStyle(.secondary)
+
+            Spacer()
+
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.clockwise").font(.caption2)
+                Text(refreshTimeString).font(.caption2)
+            }
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    /// X-axis tick marks + time labels at 0 / 30 / 60 / 90 min.
+    private func xAxisLabels(using points: [any _TimestampedPoint]) -> some View {
+        GeometryReader { geo in
+            let w  = geo.size.width
+            let wb = (w - 17.0) / 18.0
+
+            ZStack(alignment: .topLeading) {
+                // Tick marks
+                ForEach([0, 6, 12, 17], id: \.self) { col in
+                    Rectangle()
+                        .fill(Color.secondary)
+                        .frame(width: 1.5, height: 5)
+                        .offset(x: Double(col) * (wb + (col == 0 ? 0 : 1.0)) + 0.5 * wb - 0.75, y: 0)
+                }
+
+                // Labels at 0 / 30 / 60 / 90 min
+                let offsets: [(col: Int, label: Int)] = [(0, 0), (6, 6), (12, 12), (17, 18)]
+                ForEach(offsets, id: \.col) { item in
+                    Text(timeStringFor(index: item.label, points: points))
+                        .font(.system(size: 8))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 40, alignment: .center)
+                        .offset(
+                            x: Double(item.col) * (wb + (item.col == 0 ? 0 : 1.0)) + 0.5 * wb - 20.0,
+                            y: 7
+                        )
+                }
+            }
+        }
+        .frame(height: 24)
+    }
+
+    private func timeStringFor(index: Int, points: [any _TimestampedPoint]) -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm"
+        if index < points.count { return fmt.string(from: points[index].pointTimestamp) }
+        return fmt.string(from: entry.date.addingTimeInterval(TimeInterval(index * 5 * 60)))
+    }
+
     // MARK: - Error View
-    
+
     private func errorView(_ message: String) -> some View {
         VStack(spacing: 4) {
             Image(systemName: "exclamationmark.icloud")
-                .font(.title2)
-                .foregroundStyle(.secondary)
+                .font(.title2).foregroundStyle(.secondary)
             Text(message)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .padding()
     }
 }
 
+// MARK: - Internal Timestamp Protocol
+
+/// Allows `xAxisLabels` to work with both `PrecipitationPoint` and `UVPoint`
+/// without a full generic type parameter on the view.
+protocol _TimestampedPoint {
+    var pointTimestamp: Date { get }
+}
+
+extension PrecipitationPoint: _TimestampedPoint {
+    var pointTimestamp: Date { timestamp }
+}
+
+extension UVPoint: _TimestampedPoint {
+    var pointTimestamp: Date { timestamp }
+}
+
 // MARK: - Widget Configuration
 
 struct RegenWidget: Widget {
     let kind: String = "RegenWidget"
-    
+
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: RegenTimelineProvider()) { entry in
+        AppIntentConfiguration(
+            kind: kind,
+            intent: ConfigurationAppIntent.self,
+            provider: RegenTimelineProvider()
+        ) { entry in
             if #available(iOS 17.0, *) {
                 RegenWidgetEntryView(entry: entry)
                     .containerBackground(.fill.tertiary, for: .widget)
@@ -374,12 +500,12 @@ struct RegenWidget: Widget {
             }
         }
         .configurationDisplayName("Regenradar")
-        .description("Niederschlagsvorhersage für die nächsten 90 Minuten")
+        .description("Niederschlag & UV-Index für die nächsten 90 Minuten.")
         .supportedFamilies([.systemSmall, .systemMedium])
     }
 }
 
-// MARK: - Preview
+// MARK: - Previews
 
 #Preview(as: .systemSmall) {
     RegenWidget()

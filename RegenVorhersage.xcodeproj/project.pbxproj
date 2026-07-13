@@ -53,6 +53,8 @@
 				Secrets.swift,
 				SharedLocationStore.swift,
 				TomorrowIOProvider.swift,
+				UVFetcher.swift,
+				UVPoint.swift,
 			);
 			target = 2BBEE67A2FFCE7310086EBB7 /* RegenVorhersage */;
 		};

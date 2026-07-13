@@ -200,9 +200,14 @@ struct ContentView: View {
     @StateObject private var locationManager = AppLocationManager()
     
     @State private var precipitationPoints: [PrecipitationPoint] = []
+    @State private var uvPoints: [UVPoint] = []
+    @State private var lastPrecipFetchTime: Date? = nil
+    @State private var lastUVFetchTime: Date? = nil
     @State private var fetchError: String? = nil
     @State private var isFetching: Bool = false
     @State private var lastFetchTime: Date? = nil
+    
+    private static let logger = Logger(subsystem: "sascha.RegenVorhersage", category: "ContentView")
     
     // Manual location state
     @State private var isManualLocation = false
@@ -213,6 +218,11 @@ struct ContentView: View {
     
     @AppStorage(SharedLocationStore.updateIntervalKey, store: UserDefaults(suiteName: SharedLocationStore.appGroupID))
     private var updateIntervalMinutes: Int = 15
+
+    @AppStorage(SharedLocationStore.widgetModeKey, store: UserDefaults(suiteName: SharedLocationStore.appGroupID))
+    private var widgetModeStr: String = WidgetMode.rain.rawValue
+
+    private var widgetMode: WidgetMode { WidgetMode(rawValue: widgetModeStr) ?? .rain }
     
     /// The coordinate currently used for data fetching (manual or GPS).
     private var activeCoordinate: CLLocationCoordinate2D? {
@@ -340,7 +350,7 @@ struct ContentView: View {
                     }
                     
                     Divider()
-                    
+
                     HStack {
                         Text("Aktualisierungsintervall")
                             .font(.callout)
@@ -355,6 +365,25 @@ struct ContentView: View {
                             WidgetCenter.shared.reloadAllTimelines()
                         }
                     }
+
+                    Divider()
+
+                    HStack {
+                        Text("Widget-Modus")
+                            .font(.callout)
+                        Spacer()
+                        Picker("Modus", selection: $widgetModeStr) {
+                            Label("Regen", systemImage: "cloud.rain.fill").tag(WidgetMode.rain.rawValue)
+                            Label("UV-Index", systemImage: "sun.max.fill").tag(WidgetMode.uv.rawValue)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 160)
+                        .onChange(of: widgetModeStr) { _, newValue in
+                            SharedLocationStore.widgetMode = newValue
+                            WidgetCenter.shared.reloadAllTimelines()
+                            fetchData()
+                        }
+                    }
                 }
                 .padding()
                 .background(RoundedRectangle(cornerRadius: 12).fill(.ultraThinMaterial))
@@ -367,7 +396,7 @@ struct ContentView: View {
                             .font(.headline)
                         Spacer()
                         Button {
-                            fetchData()
+                            fetchData(force: true)
                         } label: {
                             Image(systemName: "arrow.clockwise")
                         }
@@ -380,15 +409,38 @@ struct ContentView: View {
                             .foregroundColor(.red)
                             .font(.caption)
                     } else if isFetching {
-                        ProgressView("Lade Radardaten...")
+                        ProgressView("Lade Daten...")
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding()
-                    } else if !precipitationPoints.isEmpty {
+                    } else if widgetMode == .uv && !uvPoints.isEmpty {
                         Text("Letztes Update: \(lastFetchTime?.formatted(date: .omitted, time: .standard) ?? "-")")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        
+
+                        VStack(spacing: 4) {
+                            ForEach(uvPoints.prefix(18)) { point in
+                                HStack {
+                                    Text(point.timestamp.formatted(date: .omitted, time: .shortened))
+                                        .frame(width: 50, alignment: .leading)
+                                    Text("+\(point.minutesFromNow)m")
+                                        .frame(width: 50, alignment: .leading)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text("UV \(String(format: "%.1f", point.uvIndex))")
+                                        .frame(width: 70, alignment: .trailing)
+                                        .foregroundStyle(uvDiagColor(for: point.uvIndex))
+                                }
+                                .font(.caption.monospacedDigit())
+                            }
+                        }
+                        .padding(.top, 4)
+                    } else if widgetMode == .rain && !precipitationPoints.isEmpty {
+                        Text("Letztes Update: \(lastFetchTime?.formatted(date: .omitted, time: .standard) ?? "-")")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
                         VStack(spacing: 4) {
                             ForEach(precipitationPoints.prefix(18)) { point in
                                 HStack {
@@ -421,8 +473,12 @@ struct ContentView: View {
             .padding(.bottom, 20)
         }
         .onChange(of: locationManager.currentLocation) { oldValue, newValue in
-            if !isManualLocation && precipitationPoints.isEmpty {
-                fetchData()
+            if !isManualLocation {
+                if widgetMode == .rain && precipitationPoints.isEmpty {
+                    fetchData()
+                } else if widgetMode == .uv && uvPoints.isEmpty {
+                    fetchData()
+                }
             }
         }
         .sheet(isPresented: $showingLocationSearch) {
@@ -442,6 +498,9 @@ struct ContentView: View {
         manualLongitude = coordinate.longitude
         manualLocationName = name
         precipitationPoints = []
+        uvPoints = []
+        lastPrecipFetchTime = nil
+        lastUVFetchTime = nil
         fetchError = nil
         
         // Persist to shared store so the widget picks up the manual location
@@ -459,6 +518,9 @@ struct ContentView: View {
         manualLongitude = nil
         manualLocationName = nil
         precipitationPoints = []
+        uvPoints = []
+        lastPrecipFetchTime = nil
+        lastUVFetchTime = nil
         fetchError = nil
         
         // Clear the shared store so the widget reverts to GPS
@@ -468,22 +530,56 @@ struct ContentView: View {
         fetchData()
     }
     
-    private func fetchData() {
+    private func shouldFetch(for mode: WidgetMode) -> Bool {
+        let now = Date()
+        let intervalSeconds = Double(updateIntervalMinutes * 60)
+        switch mode {
+        case .rain:
+            guard let lastTime = lastPrecipFetchTime else { return true }
+            return now.timeIntervalSince(lastTime) > intervalSeconds || precipitationPoints.isEmpty
+        case .uv:
+            guard let lastTime = lastUVFetchTime else { return true }
+            return now.timeIntervalSince(lastTime) > intervalSeconds || uvPoints.isEmpty
+        }
+    }
+
+    private func fetchData(force: Bool = false) {
         guard let coordinate = activeCoordinate else { return }
+        
+        let mode = widgetMode
+        if !force && !shouldFetch(for: mode) {
+            Self.logger.info("ℹ️ [ContentView] Using cached data for \(mode.rawValue), fetched recently.")
+            return
+        }
+        
         isFetching = true
         fetchError = nil
         
         Task {
             do {
-                let provider = PrecipitationProviderFactory.provider(for: coordinate)
-                let points = try await provider.fetchPrecipitation(
-                    lat: coordinate.latitude,
-                    lon: coordinate.longitude
-                )
-                await MainActor.run {
-                    self.precipitationPoints = points
-                    self.lastFetchTime = Date()
-                    self.isFetching = false
+                if mode == .rain {
+                    let provider = PrecipitationProviderFactory.provider(for: coordinate)
+                    let points = try await provider.fetchPrecipitation(
+                        lat: coordinate.latitude,
+                        lon: coordinate.longitude
+                    )
+                    await MainActor.run {
+                        self.precipitationPoints = points
+                        self.lastPrecipFetchTime = Date()
+                        self.lastFetchTime = Date()
+                        self.isFetching = false
+                    }
+                } else {
+                    let points = try await UVFetcher().fetchUVIndex(
+                        lat: coordinate.latitude,
+                        lon: coordinate.longitude
+                    )
+                    await MainActor.run {
+                        self.uvPoints = points
+                        self.lastUVFetchTime = Date()
+                        self.lastFetchTime = Date()
+                        self.isFetching = false
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -494,8 +590,19 @@ struct ContentView: View {
         }
     }
     
+    // MARK: - UV Diagnostics Color Helper
+
+    private func uvDiagColor(for uvIndex: Double) -> Color {
+        switch uvIndex {
+        case ..<3:  return .green
+        case ..<6:  return .yellow
+        case ..<8:  return .orange
+        default:    return .red
+        }
+    }
+
     // MARK: - Status Helpers
-    
+
     private var statusIcon: String {
         switch locationManager.authorizationStatus {
         case .authorizedWhenInUse, .authorizedAlways:

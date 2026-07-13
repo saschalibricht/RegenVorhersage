@@ -8,6 +8,16 @@
 import CoreLocation
 import os
 
+// MARK: - Widget Display Mode
+
+/// Determines what data the widget chart displays.
+/// `AppEnum` conformance is added in `WidgetConfigIntent.swift` (widget target only),
+/// so the main app can use this type without importing AppIntents.
+enum WidgetMode: String, CaseIterable, Sendable {
+    case rain = "rain"
+    case uv   = "uv"
+}
+
 // MARK: - Shared Location Store
 
 /// Persists the user's location preference (automatic vs. manual) in an App Group
@@ -27,7 +37,11 @@ enum SharedLocationStore {
     private static let latitudeKey = "manualLocation_latitude"
     private static let longitudeKey = "manualLocation_longitude"
     private static let nameKey = "manualLocation_name"
-    static let updateIntervalKey = "settings_updateInterval"
+    static let updateIntervalKey      = "settings_updateInterval"
+    /// Stores the currently active widget mode ("rain" or "uv").
+    static let widgetModeKey            = "settings_widgetMode"
+    /// Stores the last intent mode seen by the widget — used to detect genuine long-press changes.
+    static let lastWidgetIntentModeKey  = "settings_lastWidgetIntentMode"
     
     /// The shared UserDefaults suite for the app group.
     private static var sharedDefaults: UserDefaults? {
@@ -64,6 +78,18 @@ enum SharedLocationStore {
     static var updateIntervalMinutes: Int {
         let val = sharedDefaults?.integer(forKey: updateIntervalKey) ?? 0
         return val > 0 ? val : 15
+    }
+
+    /// The active widget display mode (rain or UV). Defaults to rain.
+    static var widgetMode: String {
+        get { sharedDefaults?.string(forKey: widgetModeKey) ?? WidgetMode.rain.rawValue }
+        set { sharedDefaults?.set(newValue, forKey: widgetModeKey) }
+    }
+
+    /// The last intent mode the widget observed — used to detect long-press configuration changes.
+    static var lastWidgetIntentMode: String {
+        get { sharedDefaults?.string(forKey: lastWidgetIntentModeKey) ?? WidgetMode.rain.rawValue }
+        set { sharedDefaults?.set(newValue, forKey: lastWidgetIntentModeKey) }
     }
     
     // MARK: - Write
