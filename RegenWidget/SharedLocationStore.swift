@@ -27,6 +27,7 @@ enum SharedLocationStore {
     private static let latitudeKey = "manualLocation_latitude"
     private static let longitudeKey = "manualLocation_longitude"
     private static let nameKey = "manualLocation_name"
+    static let updateIntervalKey = "settings_updateInterval"
     
     /// The shared UserDefaults suite for the app group.
     private static var sharedDefaults: UserDefaults? {
@@ -57,6 +58,12 @@ enum SharedLocationStore {
     static var manualLocationName: String? {
         guard isManualLocation else { return nil }
         return sharedDefaults?.string(forKey: nameKey)
+    }
+    
+    /// The user-configured update interval in minutes (default 15)
+    static var updateIntervalMinutes: Int {
+        let val = sharedDefaults?.integer(forKey: updateIntervalKey) ?? 0
+        return val > 0 ? val : 15
     }
     
     // MARK: - Write

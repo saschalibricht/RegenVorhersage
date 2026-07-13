@@ -64,9 +64,10 @@ struct RegenTimelineProvider: TimelineProvider {
         Task {
             let entry = await fetchRadarEntry()
             
-            // Reload in exactly 15 minutes
-            let reloadDate = Calendar.current.date(byAdding: .minute, value: 15, to: Date())!
-            Self.logger.info("🔄 [TimelineProvider] Next reload scheduled at: \(reloadDate)")
+            // Reload based on user configuration
+            let interval = SharedLocationStore.updateIntervalMinutes
+            let reloadDate = Calendar.current.date(byAdding: .minute, value: interval, to: Date())!
+            Self.logger.info("🔄 [TimelineProvider] Next reload scheduled at: \(reloadDate) (in \(interval) min)")
             
             let timeline = Timeline(entries: [entry], policy: .after(reloadDate))
             completion(timeline)
@@ -160,10 +161,6 @@ struct RegenWidgetEntryView: View {
     /// Maximum precipitation across displayed points, used for sensible scaling.
     private var yAxisMax: Double {
         let maxVal = displayPoints.map(\.precipitationMM).max() ?? 0
-        if maxVal <= 0.5 { return 0.5 }
-        if maxVal <= 1.0 { return 1.0 }
-        if maxVal <= 2.0 { return 2.0 }
-        if maxVal <= 5.0 { return 5.0 }
         if maxVal <= 10.0 { return 10.0 }
         if maxVal <= 20.0 { return 20.0 }
         return ceil(maxVal / 10.0) * 10.0
@@ -259,7 +256,7 @@ struct RegenWidgetEntryView: View {
                         // Bars
                         HStack(alignment: .bottom, spacing: 1) {
                             ForEach(Array(displayPoints.enumerated()), id: \.element.id) { index, point in
-                                barColumn(for: point, maxHeight: chartHeight - 12)
+                                barColumn(for: point, maxHeight: chartHeight - 24)
                             }
                         }
                         .frame(maxWidth: .infinity)
@@ -299,9 +296,11 @@ struct RegenWidgetEntryView: View {
     
     private func barColumn(for point: PrecipitationPoint, maxHeight: CGFloat) -> some View {
         let hasRain = point.precipitationMM > 0
+        let baseline = maxHeight * 0.1
+        
         let height: CGFloat = hasRain
-            ? max(4, CGFloat(point.precipitationMM / yAxisMax) * maxHeight)
-            : maxHeight * 0.1 // minimal height for zero-rain columns
+            ? baseline + CGFloat(point.precipitationMM / yAxisMax) * (maxHeight - baseline)
+            : baseline
         
         return RoundedRectangle(cornerRadius: 2)
             .fill(hasRain ? Color.blue : Color.gray.opacity(0.3))

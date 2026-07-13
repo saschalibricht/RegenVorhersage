@@ -211,6 +211,9 @@ struct ContentView: View {
     @State private var manualLocationName: String? = nil
     @State private var showingLocationSearch = false
     
+    @AppStorage(SharedLocationStore.updateIntervalKey, store: UserDefaults(suiteName: SharedLocationStore.appGroupID))
+    private var updateIntervalMinutes: Int = 15
+    
     /// The coordinate currently used for data fetching (manual or GPS).
     private var activeCoordinate: CLLocationCoordinate2D? {
         if isManualLocation, let lat = manualLatitude, let lon = manualLongitude {
@@ -334,6 +337,23 @@ struct ContentView: View {
                                 .font(.callout)
                         }
                         .buttonStyle(.bordered)
+                    }
+                    
+                    Divider()
+                    
+                    HStack {
+                        Text("Aktualisierungsintervall")
+                            .font(.callout)
+                        Spacer()
+                        Picker("Intervall", selection: $updateIntervalMinutes) {
+                            Text("5 Min").tag(5)
+                            Text("10 Min").tag(10)
+                            Text("15 Min").tag(15)
+                        }
+                        .pickerStyle(.menu)
+                        .onChange(of: updateIntervalMinutes) { _, _ in
+                            WidgetCenter.shared.reloadAllTimelines()
+                        }
                     }
                 }
                 .padding()
