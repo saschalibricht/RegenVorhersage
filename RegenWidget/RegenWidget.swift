@@ -227,7 +227,7 @@ struct RegenWidgetEntryView: View {
             
             // Bar chart area
             GeometryReader { geometry in
-                let chartHeight = max(0, geometry.size.height - 24)
+                let chartHeight = max(0, geometry.size.height - 28)
                 VStack(spacing: 0) {
                     ZStack(alignment: .bottom) {
                         // Background Grid & Y-Axis Label
@@ -262,29 +262,67 @@ struct RegenWidgetEntryView: View {
                         .frame(maxWidth: .infinity)
                     }
                     
-                    // X-axis tick labels every 30 minutes (indices 0, 6, 12)
-                    HStack(spacing: 0) {
-                        Text(timeString(for: 0))
-                            .font(.system(size: 8))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                    // X-axis tick labels every 30 minutes (indices 0, 6, 12, 18)
+                    GeometryReader { labelGeo in
+                        let w = labelGeo.size.width
+                        let wb = (w - 17.0) / 18.0
                         
-                        Text(timeString(for: 6))
-                            .font(.system(size: 8))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                        
-                        Text(timeString(for: 12))
-                            .font(.system(size: 8))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                        
-                        Text(timeString(for: 18))
-                            .font(.system(size: 8))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .trailing)
+                        ZStack(alignment: .topLeading) {
+                            // Tick marks
+                            Rectangle()
+                                .fill(Color.secondary.opacity(0.3))
+                                .frame(width: 1, height: 4)
+                                .offset(x: 0.5 * wb, y: 0)
+                            
+                            Rectangle()
+                                .fill(Color.secondary.opacity(0.3))
+                                .frame(width: 1, height: 4)
+                                .offset(x: 6.0 * (wb + 1.0) + 0.5 * wb, y: 0)
+                            
+                            Rectangle()
+                                .fill(Color.secondary.opacity(0.3))
+                                .frame(width: 1, height: 4)
+                                .offset(x: 12.0 * (wb + 1.0) + 0.5 * wb, y: 0)
+                            
+                            Rectangle()
+                                .fill(Color.secondary.opacity(0.3))
+                                .frame(width: 1, height: 4)
+                                .offset(x: 17.0 * (wb + 1.0) + 0.5 * wb, y: 0)
+                            
+                            // 0 min
+                            Text(timeString(for: 0))
+                                .font(.system(size: 8))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                                .rotationEffect(.degrees(-45), anchor: .topTrailing)
+                                .offset(x: 0.5 * wb - 40.0, y: 4)
+                            
+                            // 30 min
+                            Text(timeString(for: 6))
+                                .font(.system(size: 8))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                                .rotationEffect(.degrees(-45), anchor: .topTrailing)
+                                .offset(x: 6.0 * (wb + 1.0) + 0.5 * wb - 40.0, y: 4)
+                            
+                            // 60 min
+                            Text(timeString(for: 12))
+                                .font(.system(size: 8))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                                .rotationEffect(.degrees(-45), anchor: .topTrailing)
+                                .offset(x: 12.0 * (wb + 1.0) + 0.5 * wb - 40.0, y: 4)
+                            
+                            // 90 min
+                            Text(timeString(for: 18))
+                                .font(.system(size: 8))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                                .rotationEffect(.degrees(-45), anchor: .topTrailing)
+                                .offset(x: 17.0 * (wb + 1.0) + 0.5 * wb - 40.0, y: 4)
+                        }
                     }
-                    .padding(.top, 4)
+                    .frame(height: 28)
                 }
             }
         }

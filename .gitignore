@@ -62,3 +62,4 @@ exportOptions.plist
 *.key
 *.cert
 *.pem
+.agents/rules/dontbuild.md
