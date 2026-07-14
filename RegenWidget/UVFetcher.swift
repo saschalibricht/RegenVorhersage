@@ -50,11 +50,20 @@ struct UVFetcher {
     func fetchUVIndex(lat: Double, lon: Double) async throws -> [UVPoint] {
         let location = "\(lat),\(lon)"
 
+        var calendar = Calendar.current
+        calendar.timeZone = TimeZone.current
+        let startOfDay = calendar.startOfDay(for: Date())
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+        let isoFull = ISO8601DateFormatter()
+        isoFull.formatOptions = [.withInternetDateTime]
+
         var components = URLComponents(string: "https://api.tomorrow.io/v4/timelines")!
         components.queryItems = [
             URLQueryItem(name: "location",  value: location),
             URLQueryItem(name: "fields",    value: "uvIndex"),
-            URLQueryItem(name: "timesteps", value: "5m"),
+            URLQueryItem(name: "timesteps", value: "1h"),
+            URLQueryItem(name: "startTime", value: isoFull.string(from: startOfDay)),
+            URLQueryItem(name: "endTime",   value: isoFull.string(from: endOfDay)),
             URLQueryItem(name: "units",     value: "metric"),
             URLQueryItem(name: "apikey",    value: Secrets.tomorrowIOApiKey),
         ]
@@ -88,18 +97,16 @@ struct UVFetcher {
             throw RadarFetchError.decodingError(error)
         }
 
-        guard let timeline = uvResponse.data.timelines.first(where: { $0.timestep == "5m" }) else {
-            Self.logger.warning("⚠️ [UVFetcher] No 5m timeline found")
+        guard let timeline = uvResponse.data.timelines.first(where: { $0.timestep == "1h" }) else {
+            Self.logger.warning("⚠️ [UVFetcher] No 1h timeline found")
             throw RadarFetchError.noData
         }
 
-        let intervals = Array(timeline.intervals.prefix(Self.intervalCount))
+        let intervals = timeline.intervals
         guard !intervals.isEmpty else {
             throw RadarFetchError.noData
         }
 
-        let isoFull = ISO8601DateFormatter()
-        isoFull.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let isoBasic = ISO8601DateFormatter()
         isoBasic.formatOptions = [.withInternetDateTime]
 
@@ -119,8 +126,17 @@ struct UVFetcher {
                                   minutesFromNow: minutesFromNow))
         }
 
-        let maxUV = points.map(\.uvIndex).max() ?? 0
-        Self.logger.info("🌞 [UVFetcher] Parsed \(points.count) UV points, max=\(String(format: "%.1f", maxUV))")
-        return points
+        // Find the active daylight hours
+        let firstNonZero = points.firstIndex(where: { $0.uvIndex > 0 }) ?? 6
+        let lastNonZero = points.lastIndex(where: { $0.uvIndex > 0 }) ?? min(18, points.count - 1)
+
+        let startIndex = max(0, firstNonZero - 1)
+        let endIndex = min(points.count - 1, lastNonZero + 1)
+        
+        let resultPoints = Array(points[startIndex...endIndex])
+
+        let maxUV = resultPoints.map(\.uvIndex).max() ?? 0
+        Self.logger.info("🌞 [UVFetcher] Parsed \(resultPoints.count) UV points, max=\(String(format: "%.1f", maxUV))")
+        return resultPoints
     }
 }

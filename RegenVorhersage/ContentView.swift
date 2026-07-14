@@ -354,15 +354,22 @@ struct ContentView: View {
                     HStack {
                         Text("Aktualisierungsintervall")
                             .font(.callout)
+                            .foregroundStyle(widgetMode == .uv ? .secondary : .primary)
                         Spacer()
-                        Picker("Intervall", selection: $updateIntervalMinutes) {
-                            Text("5 Min").tag(5)
-                            Text("10 Min").tag(10)
-                            Text("15 Min").tag(15)
-                        }
-                        .pickerStyle(.menu)
-                        .onChange(of: updateIntervalMinutes) { _, _ in
-                            WidgetCenter.shared.reloadAllTimelines()
+                        if widgetMode == .uv {
+                            Text("1h")
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Picker("Intervall", selection: $updateIntervalMinutes) {
+                                Text("5 Min").tag(5)
+                                Text("10 Min").tag(10)
+                                Text("15 Min").tag(15)
+                            }
+                            .pickerStyle(.menu)
+                            .onChange(of: updateIntervalMinutes) { _, _ in
+                                WidgetCenter.shared.reloadAllTimelines()
+                            }
                         }
                     }
 
@@ -556,12 +563,13 @@ struct ContentView: View {
     
     private func shouldFetch(for mode: WidgetMode) -> Bool {
         let now = Date()
-        let intervalSeconds = Double(updateIntervalMinutes * 60)
         switch mode {
         case .rain:
+            let intervalSeconds = Double(updateIntervalMinutes * 60)
             guard let lastTime = lastPrecipFetchTime else { return true }
             return now.timeIntervalSince(lastTime) > intervalSeconds || precipitationPoints.isEmpty
         case .uv:
+            let intervalSeconds = Double(60 * 60) // 1 hour
             guard let lastTime = lastUVFetchTime else { return true }
             return now.timeIntervalSince(lastTime) > intervalSeconds || uvPoints.isEmpty
         }

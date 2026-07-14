@@ -8,17 +8,25 @@
 import AppIntents
 import WidgetKit
 
-// MARK: - Widget Mode (AppEnum conformance — widget target only)
+// MARK: - Widget Intent Mode
 
-extension WidgetMode: AppEnum {
+enum WidgetIntentMode: String, AppEnum {
+    case mirrorApp = "mirrorApp"
+    case rain = "rain"
+    case uv = "uv"
+    
     static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Widget-Modus")
-    static var caseDisplayRepresentations: [WidgetMode: DisplayRepresentation] = [
+    static var caseDisplayRepresentations: [WidgetIntentMode: DisplayRepresentation] = [
+        .mirrorApp: DisplayRepresentation(
+            title: "App-Einstellung",
+            image: .init(systemName: "iphone")
+        ),
         .rain: DisplayRepresentation(
-            title: "Regen",
+            title: "Immer Regen",
             image: .init(systemName: "cloud.rain.fill")
         ),
         .uv: DisplayRepresentation(
-            title: "UV-Index",
+            title: "Immer UV-Index",
             image: .init(systemName: "sun.max.fill")
         ),
     ]
@@ -33,6 +41,6 @@ struct ConfigurationAppIntent: WidgetConfigurationIntent {
     static var title: LocalizedStringResource = "Widget-Modus"
     static var description = IntentDescription("Wähle zwischen Regen- und UV-Index-Anzeige.")
 
-    @Parameter(title: "Modus", default: .rain)
-    var mode: WidgetMode
+    @Parameter(title: "Modus", default: .mirrorApp)
+    var mode: WidgetIntentMode
 }

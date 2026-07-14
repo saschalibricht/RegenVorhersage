@@ -53,8 +53,6 @@ enum SharedLocationStore {
     static let updateIntervalKey      = "settings_updateInterval"
     /// Stores the currently active widget mode ("rain" or "uv").
     static let widgetModeKey            = "settings_widgetMode"
-    /// Stores the last intent mode seen by the widget — used to detect genuine long-press changes.
-    static let lastWidgetIntentModeKey  = "settings_lastWidgetIntentMode"
     
     /// The shared UserDefaults suite for the app group.
     /// Falls back to standard UserDefaults if the app group container is not available.
@@ -103,12 +101,6 @@ enum SharedLocationStore {
     static var widgetMode: String {
         get { sharedDefaults.string(forKey: widgetModeKey) ?? WidgetMode.rain.rawValue }
         set { sharedDefaults.set(newValue, forKey: widgetModeKey) }
-    }
-
-    /// The last intent mode the widget observed — used to detect long-press configuration changes.
-    static var lastWidgetIntentMode: String {
-        get { sharedDefaults.string(forKey: lastWidgetIntentModeKey) ?? WidgetMode.rain.rawValue }
-        set { sharedDefaults.set(newValue, forKey: lastWidgetIntentModeKey) }
     }
     
     // MARK: - Write

@@ -76,7 +76,7 @@ struct RegenTimelineProvider: AppIntentTimelineProvider {
     func timeline(for configuration: ConfigurationAppIntent, in context: Context) async -> Timeline<RegenEntry> {
         Self.logger.info("🔄 [TimelineProvider] timeline() called")
         let entry = await fetchEntry(configuration: configuration)
-        let interval = SharedLocationStore.updateIntervalMinutes
+        let interval = entry.widgetMode == .uv ? 60 : SharedLocationStore.updateIntervalMinutes
         let reloadDate = Calendar.current.date(byAdding: .minute, value: interval, to: Date())!
         Self.logger.info("🔄 [TimelineProvider] Next reload in \(interval) min at \(reloadDate)")
         return Timeline(entries: [entry], policy: .after(reloadDate))
@@ -84,29 +84,14 @@ struct RegenTimelineProvider: AppIntentTimelineProvider {
 
     // MARK: - Mode Resolution
 
-    /// Determines the effective widget mode.
-    ///
-    /// Uses `lastWidgetIntentMode` to detect genuine long-press configuration changes:
-    /// - If the intent mode differs from the last-seen intent mode → user long-pressed → intent wins.
-    /// - Otherwise → use `SharedLocationStore.widgetMode` (may have been updated by the app).
-    ///
-    /// This lets both the long-press widget config AND the in-app picker drive the mode correctly.
     private func resolveMode(configuration: ConfigurationAppIntent) -> WidgetMode {
-        let intentMode    = configuration.mode
-        let lastIntentStr = SharedLocationStore.lastWidgetIntentMode
-        let lastIntent    = WidgetMode(rawValue: lastIntentStr) ?? .rain
-
-        // Always record the current intent so future calls can detect genuine changes.
-        SharedLocationStore.lastWidgetIntentMode = intentMode.rawValue
-
-        if intentMode != lastIntent {
-            // Intent changed since last call → genuine long-press selection.
-            // Override the store so the app reflects the new choice.
-            SharedLocationStore.widgetMode = intentMode.rawValue
-            return intentMode
-        } else {
-            // Intent unchanged → honour store (app may have set a different mode).
-            return WidgetMode(rawValue: SharedLocationStore.widgetMode) ?? intentMode
+        switch configuration.mode {
+        case .mirrorApp:
+            return WidgetMode(rawValue: SharedLocationStore.widgetMode) ?? .rain
+        case .rain:
+            return .rain
+        case .uv:
+            return .uv
         }
     }
 
@@ -206,7 +191,7 @@ struct RegenWidgetEntryView: View {
     // MARK: UV helpers
 
     private var uvDisplayPoints: [UVPoint] {
-        Array(entry.uvPoints.prefix(18))
+        entry.uvPoints
     }
 
     /// Y-axis ceiling for UV: default 8, scales up if any value exceeds it.
@@ -410,30 +395,30 @@ struct RegenWidgetEntryView: View {
         }
     }
 
-    /// X-axis tick marks + time labels at 0 / 30 / 60 / 90 min.
     private func xAxisLabels(using points: [any _TimestampedPoint]) -> some View {
         GeometryReader { geo in
+            let count = max(1, points.count)
             let w  = geo.size.width
-            let wb = (w - 17.0) / 18.0
+            let wb = (w - CGFloat(count - 1)) / CGFloat(count)
 
             ZStack(alignment: .topLeading) {
                 // Tick marks
-                ForEach([0, 6, 12, 17], id: \.self) { col in
+                let tickIndices = count > 1 ? [0, count / 3, 2 * count / 3, count - 1] : [0]
+                ForEach(tickIndices, id: \.self) { col in
                     Rectangle()
                         .fill(Color.secondary)
                         .frame(width: 1.5, height: 5)
                         .offset(x: Double(col) * (wb + (col == 0 ? 0 : 1.0)) + 0.5 * wb - 0.75, y: 0)
                 }
 
-                // Labels at 0 / 30 / 60 / 90 min
-                let offsets: [(col: Int, label: Int)] = [(0, 0), (6, 6), (12, 12), (17, 18)]
-                ForEach(offsets, id: \.col) { item in
-                    Text(timeStringFor(index: item.label, points: points))
+                // Labels
+                ForEach(tickIndices, id: \.self) { col in
+                    Text(timeStringFor(index: col, points: points))
                         .font(.system(size: 8))
                         .foregroundStyle(.secondary)
                         .frame(width: 40, alignment: .center)
                         .offset(
-                            x: Double(item.col) * (wb + (item.col == 0 ? 0 : 1.0)) + 0.5 * wb - 20.0,
+                            x: Double(col) * (wb + (col == 0 ? 0 : 1.0)) + 0.5 * wb - 20.0,
                             y: 7
                         )
                 }
