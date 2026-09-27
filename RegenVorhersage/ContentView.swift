@@ -201,8 +201,10 @@ struct ContentView: View {
     
     @State private var precipitationPoints: [PrecipitationPoint] = []
     @State private var uvPoints: [UVPoint] = []
+    @State private var temperaturePoints: [TemperaturePoint] = []
     @State private var lastPrecipFetchTime: Date? = nil
     @State private var lastUVFetchTime: Date? = nil
+    @State private var lastTemperatureFetchTime: Date? = nil
     @State private var fetchError: String? = nil
     @State private var isFetching: Bool = false
     @State private var lastFetchTime: Date? = nil
@@ -354,9 +356,9 @@ struct ContentView: View {
                     HStack {
                         Text("Aktualisierungsintervall")
                             .font(.callout)
-                            .foregroundStyle(widgetMode == .uv ? .secondary : .primary)
+                            .foregroundStyle(widgetMode == .rain ? .primary : .secondary)
                         Spacer()
-                        if widgetMode == .uv {
+                        if widgetMode != .rain {
                             Text("1h")
                                 .font(.body)
                                 .foregroundStyle(.secondary)
@@ -382,9 +384,10 @@ struct ContentView: View {
                         Picker("Modus", selection: $widgetModeStr) {
                             Label("Regen", systemImage: "cloud.rain.fill").tag(WidgetMode.rain.rawValue)
                             Label("UV-Index", systemImage: "sun.max.fill").tag(WidgetMode.uv.rawValue)
+                            Label("Temperatur", systemImage: "thermometer.medium").tag(WidgetMode.temperature.rawValue)
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 160)
+                        .frame(width: 200)
                         .onChange(of: widgetModeStr) { _, newValue in
                             SharedLocationStore.widgetMode = newValue
                             WidgetCenter.shared.reloadAllTimelines()
@@ -442,6 +445,28 @@ struct ContentView: View {
                             }
                         }
                         .padding(.top, 4)
+                    } else if widgetMode == .temperature && !temperaturePoints.isEmpty {
+                        Text("Letztes Update: \(lastFetchTime?.formatted(date: .omitted, time: .standard) ?? "-")")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        VStack(spacing: 4) {
+                            ForEach(temperaturePoints) { point in
+                                HStack {
+                                    Text(point.timestamp.formatted(date: .omitted, time: .shortened))
+                                        .frame(width: 50, alignment: .leading)
+                                    Text("+\(point.minutesFromNow)m")
+                                        .frame(width: 50, alignment: .leading)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text("\(String(format: "%.1f", point.temperatureC)) °C")
+                                        .frame(width: 70, alignment: .trailing)
+                                }
+                                .font(.caption.monospacedDigit())
+                            }
+                        }
+                        .padding(.top, 4)
                     } else if widgetMode == .rain && !precipitationPoints.isEmpty {
                         Text("Letztes Update: \(lastFetchTime?.formatted(date: .omitted, time: .standard) ?? "-")")
                             .font(.caption2)
@@ -484,6 +509,8 @@ struct ContentView: View {
                 if widgetMode == .rain && precipitationPoints.isEmpty {
                     fetchData()
                 } else if widgetMode == .uv && uvPoints.isEmpty {
+                    fetchData()
+                } else if widgetMode == .temperature && temperaturePoints.isEmpty {
                     fetchData()
                 }
             }
@@ -530,8 +557,10 @@ struct ContentView: View {
         manualLocationName = name
         precipitationPoints = []
         uvPoints = []
+        temperaturePoints = []
         lastPrecipFetchTime = nil
         lastUVFetchTime = nil
+        lastTemperatureFetchTime = nil
         fetchError = nil
         
         // Persist to shared store so the widget picks up the manual location
@@ -550,8 +579,10 @@ struct ContentView: View {
         manualLocationName = nil
         precipitationPoints = []
         uvPoints = []
+        temperaturePoints = []
         lastPrecipFetchTime = nil
         lastUVFetchTime = nil
+        lastTemperatureFetchTime = nil
         fetchError = nil
         
         // Clear the shared store so the widget reverts to GPS
@@ -572,6 +603,10 @@ struct ContentView: View {
             let intervalSeconds = Double(60 * 60) // 1 hour
             guard let lastTime = lastUVFetchTime else { return true }
             return now.timeIntervalSince(lastTime) > intervalSeconds || uvPoints.isEmpty
+        case .temperature:
+            let intervalSeconds = Double(60 * 60) // 1 hour
+            guard let lastTime = lastTemperatureFetchTime else { return true }
+            return now.timeIntervalSince(lastTime) > intervalSeconds || temperaturePoints.isEmpty
         }
     }
 
@@ -589,7 +624,8 @@ struct ContentView: View {
         
         Task {
             do {
-                if mode == .rain {
+                switch mode {
+                case .rain:
                     let provider = PrecipitationProviderFactory.provider(for: coordinate)
                     let points = try await provider.fetchPrecipitation(
                         lat: coordinate.latitude,
@@ -601,7 +637,7 @@ struct ContentView: View {
                         self.lastFetchTime = Date()
                         self.isFetching = false
                     }
-                } else {
+                case .uv:
                     let points = try await UVFetcher().fetchUVIndex(
                         lat: coordinate.latitude,
                         lon: coordinate.longitude
@@ -609,6 +645,17 @@ struct ContentView: View {
                     await MainActor.run {
                         self.uvPoints = points
                         self.lastUVFetchTime = Date()
+                        self.lastFetchTime = Date()
+                        self.isFetching = false
+                    }
+                case .temperature:
+                    let points = try await TemperatureFetcher().fetchTemperature(
+                        lat: coordinate.latitude,
+                        lon: coordinate.longitude
+                    )
+                    await MainActor.run {
+                        self.temperaturePoints = points
+                        self.lastTemperatureFetchTime = Date()
                         self.lastFetchTime = Date()
                         self.isFetching = false
                     }

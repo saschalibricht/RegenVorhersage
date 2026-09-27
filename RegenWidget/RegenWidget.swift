@@ -17,6 +17,7 @@ struct RegenEntry: TimelineEntry {
     let date: Date
     let precipitationPoints: [PrecipitationPoint]
     let uvPoints: [UVPoint]
+    let temperaturePoints: [TemperaturePoint]
     let widgetMode: WidgetMode
     let errorMessage: String?
     let debugInfo: String
@@ -39,10 +40,18 @@ struct RegenEntry: TimelineEntry {
                 minutesFromNow: i * 5
             )
         }
+        let temps = (0..<13).map { i in
+            TemperaturePoint(
+                timestamp: now.addingTimeInterval(Double(i * 3600)),
+                temperatureC: [14, 15, 17, 18, 19, 20, 19, 18, 16, 14, 12, 11, 10][i],
+                minutesFromNow: i * 60
+            )
+        }
         return RegenEntry(
             date: now,
             precipitationPoints: precip,
             uvPoints: uv,
+            temperaturePoints: temps,
             widgetMode: .rain,
             errorMessage: nil,
             debugInfo: "Placeholder",
@@ -76,7 +85,7 @@ struct RegenTimelineProvider: AppIntentTimelineProvider {
     func timeline(for configuration: ConfigurationAppIntent, in context: Context) async -> Timeline<RegenEntry> {
         Self.logger.info("🔄 [TimelineProvider] timeline() called")
         let entry = await fetchEntry(configuration: configuration)
-        let interval = entry.widgetMode == .uv ? 60 : SharedLocationStore.updateIntervalMinutes
+        let interval = entry.widgetMode == .rain ? SharedLocationStore.updateIntervalMinutes : 60
         let reloadDate = Calendar.current.date(byAdding: .minute, value: interval, to: Date())!
         Self.logger.info("🔄 [TimelineProvider] Next reload in \(interval) min at \(reloadDate)")
         return Timeline(entries: [entry], policy: .after(reloadDate))
@@ -92,6 +101,8 @@ struct RegenTimelineProvider: AppIntentTimelineProvider {
             return .rain
         case .uv:
             return .uv
+        case .temperature:
+            return .temperature
         }
     }
 
@@ -125,26 +136,32 @@ struct RegenTimelineProvider: AppIntentTimelineProvider {
             // Step 2: Fetch only the required data for the active mode
             var points: [PrecipitationPoint] = []
             var uvPoints: [UVPoint] = []
+            var temperaturePoints: [TemperaturePoint] = []
 
-            if mode == .rain {
+            switch mode {
+            case .rain:
                 points = try await PrecipitationProviderFactory
                     .provider(for: coordinate)
                     .fetchPrecipitation(lat: coordinate.latitude, lon: coordinate.longitude)
-            } else {
+            case .uv:
                 uvPoints = try await UVFetcher()
                     .fetchUVIndex(lat: coordinate.latitude, lon: coordinate.longitude)
+            case .temperature:
+                temperaturePoints = try await TemperatureFetcher()
+                    .fetchTemperature(lat: coordinate.latitude, lon: coordinate.longitude)
             }
 
             let elapsed = Date().timeIntervalSince(start)
-            Self.logger.info("🔄 [TimelineProvider] ✅ Mode: \(mode.rawValue). \(points.count) rain / \(uvPoints.count) UV in \(String(format: "%.2f", elapsed))s")
+            Self.logger.info("🔄 [TimelineProvider] ✅ Mode: \(mode.rawValue). \(points.count) rain / \(uvPoints.count) UV / \(temperaturePoints.count) temp in \(String(format: "%.2f", elapsed))s")
 
             return RegenEntry(
                 date: Date(),
                 precipitationPoints: points,
                 uvPoints: uvPoints,
+                temperaturePoints: temperaturePoints,
                 widgetMode: mode,
                 errorMessage: nil,
-                debugInfo: "OK \(points.count)R \(uvPoints.count)UV (Mode: \(mode.rawValue))",
+                debugInfo: "OK \(points.count)R \(uvPoints.count)UV \(temperaturePoints.count)T (Mode: \(mode.rawValue))",
                 locality: locality
             )
 
@@ -155,6 +172,7 @@ struct RegenTimelineProvider: AppIntentTimelineProvider {
                 date: Date(),
                 precipitationPoints: [],
                 uvPoints: [],
+                temperaturePoints: [],
                 widgetMode: mode,
                 errorMessage: error.localizedDescription,
                 debugInfo: "ERR: \(error.localizedDescription)",
@@ -210,6 +228,36 @@ struct RegenWidgetEntryView: View {
         }
     }
 
+    // MARK: Temperature helpers
+
+    private var temperatureDisplayPoints: [TemperaturePoint] {
+        entry.temperaturePoints
+    }
+
+    /// Lower bound of the temperature axis: at least 1 °C below the minimum, rounded down to
+    /// a multiple of 5 °C. Handles negative temperatures and keeps the coldest bar distinguishable.
+    private var temperatureYAxisMin: Double {
+        let minVal = temperatureDisplayPoints.map(\.temperatureC).min() ?? 0
+        return floor((minVal - 1) / 5.0) * 5.0
+    }
+
+    /// Upper bound of the temperature axis: rounded up to a multiple of 5 °C.
+    private var temperatureYAxisMax: Double {
+        let maxVal = temperatureDisplayPoints.map(\.temperatureC).max() ?? 0
+        return max(temperatureYAxisMin + 5, ceil(maxVal / 5.0) * 5.0)
+    }
+
+    private func temperatureBarColor(for temperature: Double) -> Color {
+        switch temperature {
+        case ..<0:  return Color(red: 0.30, green: 0.45, blue: 0.95)  // Freezing – blue
+        case ..<10: return Color(red: 0.25, green: 0.75, blue: 0.90)  // Cold – cyan
+        case ..<20: return Color(red: 0.35, green: 0.75, blue: 0.25)  // Mild – green
+        case ..<25: return Color(red: 0.97, green: 0.80, blue: 0.05)  // Warm – yellow
+        case ..<30: return Color(red: 0.97, green: 0.49, blue: 0.09)  // Hot – orange
+        default:    return Color(red: 0.85, green: 0.14, blue: 0.14)  // Very hot – red
+        }
+    }
+
     // MARK: Shared helpers
 
     private func timeString(for index: Int, in points: [any _TimestampedPoint]) -> String {
@@ -240,6 +288,9 @@ struct RegenWidgetEntryView: View {
             case .uv:
                 if uvDisplayPoints.isEmpty { errorView("Keine UV-Daten") }
                 else { uvChartView }
+            case .temperature:
+                if temperatureDisplayPoints.isEmpty { errorView("Keine Temperaturdaten") }
+                else { temperatureChartView }
             }
         }
     }
@@ -312,20 +363,8 @@ struct RegenWidgetEntryView: View {
                 let chartH = max(0, geo.size.height - 24)
                 VStack(spacing: 0) {
                     ZStack(alignment: .bottom) {
-                        // Background grid + Y-axis label
+                        // Background grid
                         VStack(spacing: 0) {
-                            HStack(spacing: 4) {
-                                Text("UV \(Int(uvYAxisMax))")
-                                    .font(.system(size: 8))
-                                    .foregroundStyle(.secondary)
-                                Image(systemName: "sun.max.fill")
-                                    .font(.system(size: 8))
-                                    .foregroundStyle(.orange)
-                                Rectangle()
-                                    .fill(Color.secondary.opacity(0.3))
-                                    .frame(height: 0.5)
-                            }
-                            .padding(.top, 6)
                             Spacer()
                             Divider().background(Color.secondary.opacity(0.3))
                         }
@@ -358,17 +397,76 @@ struct RegenWidgetEntryView: View {
             ? baseline
             : baseline + CGFloat(clamped / uvYAxisMax) * (usableHeight - baseline)
 
+        // Highlight the bar that covers the hour of the current entry
+        let isCurrentHour = Calendar.current.isDate(point.timestamp, equalTo: entry.date, toGranularity: .hour)
+
         return VStack(spacing: 1) {
             if point.uvIndex >= 0.5 {
                 Text(String(format: "%.0f", point.uvIndex))
-                    .font(.system(size: 6.5, weight: .bold))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 6.5, weight: isCurrentHour ? .bold : .regular))
+                    .foregroundStyle(isCurrentHour ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
             } else {
                 Text(" ")
                     .font(.system(size: 6.5))
             }
             RoundedRectangle(cornerRadius: 2)
                 .fill(uvBarColor(for: point.uvIndex))
+                .frame(height: height)
+        }
+    }
+
+    // MARK: - Temperature Chart
+
+    private var temperatureChartView: some View {
+        VStack(spacing: 2) {
+            headerRow
+            GeometryReader { geo in
+                let chartH = max(0, geo.size.height - 24)
+                VStack(spacing: 0) {
+                    ZStack(alignment: .bottom) {
+                        // Background grid
+                        VStack(spacing: 0) {
+                            Spacer()
+                            Divider().background(Color.secondary.opacity(0.3))
+                        }
+                        .frame(height: chartH)
+
+                        // Bars
+                        HStack(alignment: .bottom, spacing: 1) {
+                            ForEach(temperatureDisplayPoints) { point in
+                                temperatureBarColumn(for: point, maxHeight: chartH - 24)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+
+                    xAxisLabels(using: temperatureDisplayPoints.map { $0 as any _TimestampedPoint })
+                }
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
+    }
+
+    private func temperatureBarColumn(for point: TemperaturePoint, maxHeight: CGFloat) -> some View {
+        let range    = temperatureYAxisMax - temperatureYAxisMin
+        let fraction = min(1, max(0, (point.temperatureC - temperatureYAxisMin) / range))
+        let baseline = maxHeight * 0.1
+        let textHeight: CGFloat = 8
+        let usableHeight = max(0, maxHeight - textHeight)
+        let height = baseline + CGFloat(fraction) * max(0, usableHeight - baseline)
+
+        // Highlight the bar that covers the hour of the current entry
+        let isCurrentHour = Calendar.current.isDate(point.timestamp, equalTo: entry.date, toGranularity: .hour)
+
+        return VStack(spacing: 1) {
+            Text(String(format: "%.0f", point.temperatureC))
+                .font(.system(size: 6.5, weight: isCurrentHour ? .bold : .regular))
+                .foregroundStyle(isCurrentHour ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+            RoundedRectangle(cornerRadius: 2)
+                .fill(temperatureBarColor(for: point.temperatureC))
                 .frame(height: height)
         }
     }
@@ -464,6 +562,10 @@ extension UVPoint: _TimestampedPoint {
     var pointTimestamp: Date { timestamp }
 }
 
+extension TemperaturePoint: _TimestampedPoint {
+    var pointTimestamp: Date { timestamp }
+}
+
 // MARK: - Widget Configuration
 
 struct RegenWidget: Widget {
@@ -485,7 +587,7 @@ struct RegenWidget: Widget {
             }
         }
         .configurationDisplayName("Regenradar")
-        .description("Niederschlag & UV-Index für die nächsten 90 Minuten.")
+        .description("Niederschlag, UV-Index & Temperatur.")
         .supportedFamilies([.systemSmall, .systemMedium])
     }
 }

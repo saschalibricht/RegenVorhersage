@@ -16,6 +16,7 @@ import os
 enum WidgetMode: String, CaseIterable, Sendable {
     case rain = "rain"
     case uv   = "uv"
+    case temperature = "temperature"
 }
 
 // MARK: - Shared Location Store

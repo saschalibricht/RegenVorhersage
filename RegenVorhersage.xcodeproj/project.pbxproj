@@ -52,6 +52,8 @@
 				RadarFetcher.swift,
 				Secrets.swift,
 				SharedLocationStore.swift,
+				TemperatureFetcher.swift,
+				TemperaturePoint.swift,
 				TomorrowIOProvider.swift,
 				UVFetcher.swift,
 				UVPoint.swift,

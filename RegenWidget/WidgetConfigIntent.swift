@@ -14,7 +14,8 @@ enum WidgetIntentMode: String, AppEnum {
     case mirrorApp = "mirrorApp"
     case rain = "rain"
     case uv = "uv"
-    
+    case temperature = "temperature"
+
     static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Widget-Modus")
     static var caseDisplayRepresentations: [WidgetIntentMode: DisplayRepresentation] = [
         .mirrorApp: DisplayRepresentation(
@@ -29,6 +30,10 @@ enum WidgetIntentMode: String, AppEnum {
             title: "Immer UV-Index",
             image: .init(systemName: "sun.max.fill")
         ),
+        .temperature: DisplayRepresentation(
+            title: "Immer Temperatur",
+            image: .init(systemName: "thermometer.medium")
+        ),
     ]
 }
 
@@ -39,7 +44,7 @@ enum WidgetIntentMode: String, AppEnum {
 /// in the system "Edit Widget" sheet when the user long-presses the widget.
 struct ConfigurationAppIntent: WidgetConfigurationIntent {
     static var title: LocalizedStringResource = "Widget-Modus"
-    static var description = IntentDescription("Wähle zwischen Regen- und UV-Index-Anzeige.")
+    static var description = IntentDescription("Wähle zwischen Regen-, UV-Index- und Temperatur-Anzeige.")
 
     @Parameter(title: "Modus", default: .mirrorApp)
     var mode: WidgetIntentMode
